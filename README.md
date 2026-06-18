@@ -1,4 +1,4 @@
-# Project Nahan2
+# Project Nahan
 
 ### The Ultimate Serverless Gateway on Cloudflare Workers
 
