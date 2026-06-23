@@ -5,7 +5,7 @@ import { connect } from "cloudflare:sockets";
  * Handles real-time binary streams from remote sensor nodes.
  */
 
-const CURRENT_VERSION = "2.5.5";
+const CURRENT_VERSION = "2.5.7";
 
 const getAlpha = () => String.fromCharCode(118, 108, 101, 115, 115);
 const getBeta = () => String.fromCharCode(116, 114, 111, 106, 97, 110);
@@ -62,6 +62,7 @@ const SYSTEM_DEFAULTS = {
     expiryMs: 0,
     linkedPanels: [],
     hubPanelUrl: "",
+    allowSyncWorker: false,
 };
 
 let sysConfig = { ...SYSTEM_DEFAULTS };
@@ -98,6 +99,7 @@ async function deployWorkerToCloudflare(accountId, apiToken, workerName, code) {
     const metadata = {
         main_module: "_worker.js",
         compatibility_date: "2024-03-01",
+        compatibility_flags: [ "allow_eval_during_startup" ],
         bindings: currentBindings
     };
 
@@ -417,22 +419,22 @@ export default {
 
                     if (isClashYaml) {
                         resHeaders.set("Content-Type", "text/yaml; charset=utf-8");
-                        return new Response(buildYamlProfile(clientHost, targetSub, allowInsecure), {
+                        return new Response(await buildYamlProfile(clientHost, targetSub, allowInsecure), {
                             headers: resHeaders
                         });
                     } else if (isSingboxJson) {
                         resHeaders.set("Content-Type", "application/json; charset=utf-8");
-                        return new Response(JSON.stringify(buildSingBoxJsonProfile(clientHost, targetSub, allowInsecure), null, 2), {
+                        return new Response(JSON.stringify(await buildSingBoxJsonProfile(clientHost, targetSub, allowInsecure), null, 2), {
                             headers: resHeaders
                         });
                     } else if (isClashJson) {
                         resHeaders.set("Content-Type", "application/json; charset=utf-8");
-                        return new Response(JSON.stringify(buildClashJsonProfile(clientHost, targetSub, allowInsecure), null, 2), {
+                        return new Response(JSON.stringify(await buildClashJsonProfile(clientHost, targetSub, allowInsecure), null, 2), {
                             headers: resHeaders
                         });
                     } else {
                         resHeaders.set("Content-Type", "text/plain; charset=utf-8");
-                        const raw = buildUriProfile(clientHost, targetSub, allowInsecure);
+                        const raw = await buildUriProfile(clientHost, targetSub, allowInsecure);
                         return new Response(safeBtoa(raw), {
                             headers: resHeaders
                         });
@@ -979,7 +981,7 @@ async function handleUsersApi(request, env, ctx) {
 
         if (method === "POST" && !userId) {
             const body = await request.json();
-            const { name, trafficLimit, expiryDays, notes, maxConfigs, proxyIp, userMode, userPorts } = body;
+            const { name, trafficLimit, expiryDays, notes, maxConfigs, proxyIp, cleanIp, userMode, userPorts } = body;
             if (!name) return new Response(JSON.stringify({ success: false, error: "Name is required" }), { status: 400, headers: { "Content-Type": "application/json" } });
             const newId = crypto.randomUUID();
             const newUser = {
@@ -991,6 +993,7 @@ async function handleUsersApi(request, env, ctx) {
                 notes: notes || "",
                 maxConfigs: maxConfigs ? parseInt(maxConfigs) : null,
                 proxyIp: proxyIp || null,
+cleanIp: cleanIp || null,
                 userMode: userMode || null,
                 userPorts: userPorts || null,
                 createdAt: Date.now()
@@ -1016,6 +1019,7 @@ async function handleUsersApi(request, env, ctx) {
             if (body.notes !== undefined) u.notes = body.notes;
             if (body.maxConfigs !== undefined) u.maxConfigs = body.maxConfigs ? parseInt(body.maxConfigs) : null;
             if (body.proxyIp !== undefined) u.proxyIp = body.proxyIp;
+if (body.cleanIp !== undefined) u.cleanIp = body.cleanIp;
             if (body.userMode !== undefined) u.userMode = body.userMode;
             if (body.userPorts !== undefined) u.userPorts = body.userPorts;
             if (body.status !== undefined) {
@@ -1166,25 +1170,25 @@ async function handleUpdateApi(request, env, ctx) {
                 return new Response(JSON.stringify({ success: false, error: "CF credentials not configured" }), { status: 400, headers: { "Content-Type": "application/json" } });
             }
 
-            let latestCode;
-            try {
-                const res = await fetch(`https://raw.githubusercontent.com/${repo}/main/_worker.js`);
-                if (!res.ok) throw new Error(`HTTP ${res.status}`);
-                latestCode = await res.text();
-            } catch(e) {
-                return new Response(JSON.stringify({ success: false, error: "Failed to fetch code from GitHub: " + e.message }), { status: 502, headers: { "Content-Type": "application/json" } });
+            let finalCodeToDeploy = data.code;
+            if (!finalCodeToDeploy) {
+                try {
+                    const res = await fetch(`https://raw.githubusercontent.com/${repo}/main/_worker.js`);
+                    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                    finalCodeToDeploy = await res.text();
+                } catch(e) {
+                    return new Response(JSON.stringify({ success: false, error: "Failed to fetch code from GitHub: " + e.message }), { status: 502, headers: { "Content-Type": "application/json" } });
+                }
             }
 
-            const versionMatch = latestCode.match(/const\s+CURRENT_VERSION\s*=\s*["']([^"']+)["']/);
-            if (!versionMatch) {
-                return new Response(JSON.stringify({ success: false, error: "Invalid code: missing CURRENT_VERSION" }), { status: 400, headers: { "Content-Type": "application/json" } });
-            }
-            const newVersion = versionMatch[1];
-            if (cmpVersions(CURRENT_VERSION, newVersion) >= 0) {
-                return new Response(JSON.stringify({ success: false, error: "Remote version is not newer" }), { status: 400, headers: { "Content-Type": "application/json" } });
+            const versionMatch = finalCodeToDeploy.match(/const\s+CURRENT_VERSION\s*=\s*["']([^"']+)["']/);
+            const newVersion = versionMatch ? versionMatch[1] : CURRENT_VERSION;
+
+            if (cmpVersions(CURRENT_VERSION, newVersion) >= 0 && !data.force && !data.code) {
+                return new Response(JSON.stringify({ success: false, error: "Remote version is not newer. Click force redeploy to switch formats or overwrite." }), { status: 400, headers: { "Content-Type": "application/json" } });
             }
 
-            const deployRes = await deployWorkerToCloudflare(accountId, apiToken, workerName, latestCode);
+            const deployRes = await deployWorkerToCloudflare(accountId, apiToken, workerName, finalCodeToDeploy);
             const deployResult = await deployRes.json();
 
             if (deployResult.success) {
@@ -2633,15 +2637,15 @@ async function startDataPipe(webSocket, env, ctx) {
 
     async function parseSensorData(bufferData) {
         const view = new Uint8Array(bufferData);
-        let targetAddr = "", targetPort = 0, offset = 0, isModeAlpha = false;
+        let targetAddr = "", targetPort = 0, offset = 0, isModeAlpha = false, activeProfile = null;
 
         if (view[0] === 0x00) {
             isModeAlpha = true;
             
             // Validate UUID
             let clientHash = Array.from(view.slice(1, 17)).map(b => b.toString(16).padStart(2, '0')).join('');
-            let validUUIDs = getAllProfiles().map(p => p.id.replace(/-/g, '').toLowerCase());
-            if (!validUUIDs.includes(clientHash)) return false; // DROP IF INVALID PROFILE
+            activeProfile = getAllProfiles().find(p => p.id.replace(/-/g, '').toLowerCase() === clientHash);
+            if (!activeProfile) return false; // DROP IF INVALID PROFILE
             
             activeClientHash = clientHash;
             trackUsage(activeClientHash, 0, env, ctx);
@@ -2666,10 +2670,10 @@ async function startDataPipe(webSocket, env, ctx) {
             for (let i = 0; i < bufferData.byteLength; i++) { if (view[i] === 0x0D && view[i + 1] === 0x0A) { ePos = i; break; } }
             
             let clientHashHex = new TextDecoder().decode(view.slice(0, ePos));
-            let validProfile = getAllProfiles().find(p => getTrojanHash(p.id) === clientHashHex);
-            if (!validProfile) return false;
+            activeProfile = getAllProfiles().find(p => getTrojanHash(p.id) === clientHashHex);
+            if (!activeProfile) return false;
             
-            activeClientHash = validProfile.id.replace(/-/g, '').toLowerCase();
+            activeClientHash = activeProfile.id.replace(/-/g, '').toLowerCase();
             trackUsage(activeClientHash, 0, env, ctx);
             let uTrack = uuidUsage.get(activeClientHash) || { connects: 0, last: 0 };
             uTrack.connects++;
@@ -2707,12 +2711,47 @@ async function startDataPipe(webSocket, env, ctx) {
             remoteSocket = connect({ hostname: connectAddr, port: targetPort });
             await remoteSocket.opened;
         } catch {
-            const fallbackIp = sysConfig.backupRelay || ["pro", "xy", "ip.cmliussss.net"].join("");
-            try {
-                const [altIP, altPortStr] = fallbackIp.split(":");
-                remoteSocket = connect({ hostname: altIP, port: altPortStr ? Number(altPortStr) : targetPort });
-                await remoteSocket.opened;
-            } catch { webSocket.close(); return isModeAlpha; }
+            let pips = [];
+            if (activeProfile && activeProfile.proxyIp) {
+                pips = activeProfile.proxyIp.split(/[\r\n,;]+/).map(s => s.trim()).filter(Boolean);
+            }
+            if (pips.length === 0 && sysConfig.backupRelay) {
+                pips = sysConfig.backupRelay.split(/[\r\n,;]+/).map(s => s.trim()).filter(Boolean);
+            }
+            if (pips.length === 0) {
+                pips = [["pro", "xy", "ip.cmliussss.net"].join("")];
+            }
+
+            // Consistent hash based on user/profile ID to prevent session/IP splitting across assets on Cloudflare
+            let startIndex = 0;
+            if (pips.length > 1) {
+                let hash = 0;
+                let hashStr = (activeProfile ? activeProfile.id : "");
+                for (let i = 0; i < hashStr.length; i++) {
+                    hash = hashStr.charCodeAt(i) + ((hash << 5) - hash);
+                }
+                startIndex = Math.abs(hash) % pips.length;
+            }
+
+            // Attempt to connect with automatic failover to alternative proxy IPs
+            let connected = false;
+            for (let attempt = 0; attempt < Math.min(pips.length, 3); attempt++) {
+                let currentIndex = (startIndex + attempt) % pips.length;
+                let currentProxy = pips[currentIndex];
+                try {
+                    const [altIP, altPortStr] = currentProxy.split(":");
+                    remoteSocket = connect({ hostname: altIP, port: altPortStr ? Number(altPortStr) : targetPort });
+                    await remoteSocket.opened;
+                    connected = true;
+                    break;
+                } catch (e) {
+                    // Try next fallback proxy IP in list
+                }
+            }
+            if (!connected) {
+                webSocket.close();
+                return isModeAlpha;
+            }
         }
 
         dataWriter = remoteSocket.writable.getWriter();
@@ -2804,7 +2843,7 @@ function getAllProfiles(targetSub = null) {
                 if (usr.lastDay === new Date().toISOString().split('T')[0] && usr.dReqs >= u.limitDailyReq) skip = true;
             }
             if(!skip) {
-                list.push({ id: u.id, name: u.name, proxyIp: u.proxyIp, userMode: u.userMode || null, userPorts: u.userPorts || null, maxConfigs: u.maxConfigs || null });
+                list.push({ id: u.id, name: u.name, proxyIp: u.proxyIp, cleanIp: u.cleanIp || null, userMode: u.userMode || null, userPorts: u.userPorts || null, maxConfigs: u.maxConfigs || null });
             }
         });
     }
@@ -2830,11 +2869,86 @@ function buildSingleUri(hostName) {
     return `${uriProto}://${activeDeviceId}@${finalIP}:${firstPort}?${ext}#${finalHost}`;
 }
 
-function getConfigName(type, profileName, port, hostName, ip) {
+
+function getProxyIpsArray(proxyIpString) {
+    if (!proxyIpString) return [];
+    return proxyIpString.split(/[\r\n,;]+/).map(s => {
+        let trimmed = s.trim();
+        if (!trimmed) return "";
+        let hostPort = trimmed.split('#')[0].split('@')[0];
+        if (hostPort.includes(':') && !hostPort.includes(']')) {
+            return hostPort.split(':')[0];
+        } else if (hostPort.startsWith('[') && hostPort.includes(']')) {
+            return hostPort.split(']')[0].replace('[', '');
+        }
+        return hostPort;
+    }).filter(Boolean);
+}
+
+const ipFlagCache = new Map();
+async function preloadIpFlags(profiles, hostNames) {
+    let uniqueIps = new Set();
+    profiles.forEach(p => {
+        hostNames.forEach(h => {
+            getCleanIps(h, p.cleanIp).forEach(ip => uniqueIps.add(ip));
+        });
+        if (p.proxyIp) {
+            getProxyIpsArray(p.proxyIp).forEach(ip => uniqueIps.add(ip));
+        }
+    });
+    if (sysConfig.backupRelay) {
+        getProxyIpsArray(sysConfig.backupRelay).forEach(ip => uniqueIps.add(ip));
+    }
+    
+    let promises = Array.from(uniqueIps).map(async ip => {
+        if (ipFlagCache.has(ip)) return;
+        try {
+            let cleanIp = ip.split(':')[0].replace(/[\[\]]/g, '').split('#')[0].trim();
+            const res = await fetch(`https://api.country.is/${cleanIp}`);
+            const data = await res.json();
+            if (data && data.country) {
+                const codePoints = data.country.toUpperCase().split('').map(char => 127397 + char.charCodeAt());
+                ipFlagCache.set(ip, String.fromCodePoint(...codePoints));
+                return;
+            }
+        } catch(e) {}
+        ipFlagCache.set(ip, "🌐");
+    });
+    await Promise.all(promises);
+}
+
+function getEmojiFlag(ip) {
+    if (!ip) return "🌐";
+    let clean = ip.split(':')[0].replace(/[\[\]]/g, '').split('#')[0].trim();
+    return ipFlagCache.get(ip) || ipFlagCache.get(clean) || "🌐";
+}
+
+function getConfigName(type, profileName, port, hostName, ip, proxyIp = null) {
     let prefix = sysConfig.namePrefix || "Core";
     let strategy = sysConfig.nameStrategy || "default";
     let cleanName = profileName === "Default" ? "" : `-${profileName}`;
     let typeLab = type === "alpha" ? "V" : "T";
+    
+    if (strategy.includes('{') && strategy.includes('}')) {
+        let lookupIp = ip;
+        if (proxyIp) {
+            let pips = getProxyIpsArray(proxyIp);
+            if (pips.length > 0) lookupIp = pips[0];
+        } else if (sysConfig.backupRelay) {
+            let pips = getProxyIpsArray(sysConfig.backupRelay);
+            if (pips.length > 0) lookupIp = pips[0];
+        }
+        let flagEmoji = getEmojiFlag(lookupIp);
+        let protoLab = type === "alpha" ? "VLESS" : "Trojan";
+        let resName = strategy
+            .replace(/{FLAG}/g, flagEmoji)
+            .replace(/{PROTOCOL}/g, protoLab)
+            .replace(/{USER}/g, profileName)
+            .replace(/{PORT}/g, port)
+            .replace(/{PREFIX}/g, prefix)
+            .replace(/{IP}/g, ip || '');
+        return resName;
+    }
     
     if (strategy === "type-user-port") {
         return `${type === "alpha" ? "vl" + "ess" : "tro" + "jan"}-${profileName}-${port}`;
@@ -2846,8 +2960,8 @@ function getConfigName(type, profileName, port, hostName, ip) {
         return `${prefix}${cleanName}-${port}`;
     } 
     else if (strategy === "ip") {
-    return ip || 'unknown';
-}
+        return ip || 'unknown';
+    }
     
     else { // "default"
         return `${typeLab}-Core-${port}${cleanName}`;
@@ -2863,7 +2977,7 @@ function calcEffectiveIps(ips, maxCfg, effectiveMode, effectivePorts) {
     return ips.slice(0, neededIps);
 }
 
-function buildUriProfile(hostName, targetSub = null, allowInsecure = false) {
+async function buildUriProfile(hostName, targetSub = null, allowInsecure = false) {
     let allHostNames = [hostName];
     if (sysConfig.slaveNodes) allHostNames.push(...sysConfig.slaveNodes.split(/[\r\n,;]+/).map(s=>s.trim()).filter(Boolean));
     
@@ -2872,6 +2986,7 @@ function buildUriProfile(hostName, targetSub = null, allowInsecure = false) {
     
     let lines = [];
     let profiles = getAllProfiles(targetSub);
+    await preloadIpFlags(profiles, allHostNames);
     
     // Add fake configs
     let stats = getSubscriptionStats(targetSub);
@@ -2880,12 +2995,18 @@ function buildUriProfile(hostName, targetSub = null, allowInsecure = false) {
     lines.push(fakeU1, fakeU2);
     
     profiles.forEach(p => {
+        let pips = getProxyIpsArray(p.proxyIp);
+        if (pips.length === 0 && sysConfig.backupRelay) {
+            pips = getProxyIpsArray(sysConfig.backupRelay);
+        }
         let effectiveMode = p.userMode || sysConfig.mode;
         let effectivePorts = p.userPorts ? p.userPorts.split(',').map(s=>s.trim()).filter(Boolean) : ports;
         let maxCfg = p.maxConfigs || null;
 
+        let configIndex = 0;
+
         allHostNames.forEach(hName => {
-            let allIps = getCleanIps(hName, p.proxyIp);
+            let allIps = getCleanIps(hName, p.cleanIp);
             let ips = calcEffectiveIps(allIps, maxCfg, effectiveMode, effectivePorts);
             effectivePorts.forEach(port => {
                 let sec = getTransportParams(port);
@@ -2893,8 +3014,13 @@ function buildUriProfile(hostName, targetSub = null, allowInsecure = false) {
                 if (sysConfig.enableOpt2) extBase += `&pbk=enabled`;
                 extBase += `&allowInsecure=${allowInsecure ? "1" : "0"}`;
                 ips.forEach(ip => {
-                    let vName = getConfigName("alpha", p.name, port, hName, ip);
-                    let tName = getConfigName("beta", p.name, port, hName, ip);
+                    let selectedProxyIp = null;
+                    if (pips.length > 0) {
+                        selectedProxyIp = pips[configIndex % pips.length];
+                    }
+                    let vName = getConfigName("alpha", p.name, port, hName, ip, selectedProxyIp);
+                    let tName = getConfigName("beta", p.name, port, hName, ip, selectedProxyIp);
+                    configIndex++;
                     if (effectiveMode === "alpha" || effectiveMode === "both") {
                         lines.push(`${getAlpha()}://${p.id}@${ip}:${port}?${extBase}#${vName}`);
                     }
@@ -2908,7 +3034,7 @@ function buildUriProfile(hostName, targetSub = null, allowInsecure = false) {
     return lines.join('\n');
 }
 
-function buildYamlProfile(hostName, targetSub = null, allowInsecure = false) {
+async function buildYamlProfile(hostName, targetSub = null, allowInsecure = false) {
     let allHostNames = [hostName];
     if (sysConfig.slaveNodes) allHostNames.push(...sysConfig.slaveNodes.split(/[\r\n,;]+/).map(s=>s.trim()).filter(Boolean));
     
@@ -2917,6 +3043,7 @@ function buildYamlProfile(hostName, targetSub = null, allowInsecure = false) {
     let proxyNames = [];
     let nameCounts = {}; // Track proxy names for deduplication
     let profiles = getAllProfiles(targetSub);
+    await preloadIpFlags(profiles, allHostNames);
 
     // Add fake configs
     let stats = getSubscriptionStats(targetSub);
@@ -2942,18 +3069,28 @@ function buildYamlProfile(hostName, targetSub = null, allowInsecure = false) {
     };
 
     profiles.forEach(p => {
+        let pips = getProxyIpsArray(p.proxyIp);
+        if (pips.length === 0 && sysConfig.backupRelay) {
+            pips = getProxyIpsArray(sysConfig.backupRelay);
+        }
         let effectiveMode = p.userMode || sysConfig.mode;
         let effectivePorts = p.userPorts ? p.userPorts.split(',').map(s=>s.trim()).filter(Boolean) : ports;
         let maxCfg = p.maxConfigs || null;
 
+        let configIndex = 0;
+
         allHostNames.forEach(hName => {
-            let allIps = getCleanIps(hName, p.proxyIp);
+            let allIps = getCleanIps(hName, p.cleanIp);
             let ips = calcEffectiveIps(allIps, maxCfg, effectiveMode, effectivePorts);
             effectivePorts.forEach(port => {
                 let sec = getTransportParams(port) === "tls" ? "true" : "false";
                 ips.forEach(ip => {
+                    let selectedProxyIp = null;
+                    if (pips.length > 0) {
+                        selectedProxyIp = pips[configIndex % pips.length];
+                    }
                     if (effectiveMode === "alpha" || effectiveMode === "both") {
-                        let vName = getConfigName("alpha", p.name, port, hName, ip);
+                        let vName = getConfigName("alpha", p.name, port, hName, ip, selectedProxyIp);
                         vName = getUniqueName(vName);
                         proxyNames.push(`"${vName}"`);
                         let randomJunk = Array.from({length: 11}, () => "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[Math.floor(Math.random() * 62)]).join('');
@@ -2962,7 +3099,7 @@ function buildYamlProfile(hostName, targetSub = null, allowInsecure = false) {
                         proxies.push(`- name: "${vName}"\n  type: ${getAlpha()}\n  server: ${ip}\n  port: ${port}\n  uuid: ${p.id}\n  udp: true\n  tls: ${sec}\n  servername: ${hName}\n  client-fingerprint: ${sysConfig.agent || "random"}\n  network: ws\n  ws-opts:\n    path: "${pathStrVl}"\n    headers:\n      Host: ${hName}\n  skip-cert-verify: ${allowInsecure}\n${sysConfig.enableOpt1 ? "  tfo: true" : ""}`);
                     }
                     if (effectiveMode === "beta" || effectiveMode === "both") {
-                        let tName = getConfigName("beta", p.name, port, hName, ip);
+                        let tName = getConfigName("beta", p.name, port, hName, ip, selectedProxyIp);
                         tName = getUniqueName(tName);
                         proxyNames.push(`"${tName}"`);
                         let randomJunk = Array.from({length: 11}, () => "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[Math.floor(Math.random() * 62)]).join('');
@@ -2970,6 +3107,7 @@ function buildYamlProfile(hostName, targetSub = null, allowInsecure = false) {
                         let pathStrTr = "/" + btoa(JSON.stringify(payloadTr));
                         proxies.push(`- name: "${tName}"\n  type: ${getBeta()}\n  server: ${ip}\n  port: ${port}\n  password: ${p.id}\n  udp: true\n  tls: ${sec}\n  sni: ${hName}\n  client-fingerprint: ${sysConfig.agent || "random"}\n  network: ws\n  ws-opts:\n    path: "${pathStrTr}"\n    headers:\n      Host: ${hName}\n  skip-cert-verify: ${allowInsecure}\n${sysConfig.enableOpt1 ? "  tfo: true" : ""}`);
                     }
+                    configIndex++;
                 });
             });
         });
@@ -3082,11 +3220,12 @@ function getIpTypeLabel(ip) {
     return "Domain";
 }
 
-function buildClashJsonProfile(hostName, targetSub = null, allowInsecure = false) {
+async function buildClashJsonProfile(hostName, targetSub = null, allowInsecure = false) {
     let allHostNames = [hostName];
     if (sysConfig.slaveNodes) allHostNames.push(...sysConfig.slaveNodes.split(/[\r\n,;]+/).map(s=>s.trim()).filter(Boolean));
     let ports = sysConfig.socketPorts ? sysConfig.socketPorts.split(',').map(s=>s.trim()).filter(Boolean) : ["443"];
     let profiles = getAllProfiles(targetSub);
+    await preloadIpFlags(profiles, allHostNames);
     let reqPath = encodeURI(`/${sysConfig.apiRoute}`);
 
     let proxiesArr = [];
@@ -3133,21 +3272,31 @@ function buildClashJsonProfile(hostName, targetSub = null, allowInsecure = false
     };
 
     profiles.forEach(p => {
+        let pips = getProxyIpsArray(p.proxyIp);
+        if (pips.length === 0 && sysConfig.backupRelay) {
+            pips = getProxyIpsArray(sysConfig.backupRelay);
+        }
         let effectiveMode = p.userMode || sysConfig.mode;
         let effectivePorts = p.userPorts ? p.userPorts.split(',').map(s=>s.trim()).filter(Boolean) : ports;
         let maxCfg = p.maxConfigs || null;
 
+        let configIndex = 0;
+
         allHostNames.forEach(hName => {
-            let allIps = getCleanIps(hName, p.proxyIp);
+            let allIps = getCleanIps(hName, p.cleanIp);
             let ips = calcEffectiveIps(allIps, maxCfg, effectiveMode, effectivePorts);
             effectivePorts.forEach(port => {
                 let sec = getTransportParams(port) === "tls";
                 ips.forEach(ip => {
                     let isVless = effectiveMode === "alpha" || effectiveMode === "both";
                     let isTrojan = effectiveMode === "beta" || effectiveMode === "both";
+                    let selectedProxyIp = null;
+                    if (pips.length > 0) {
+                        selectedProxyIp = pips[configIndex % pips.length];
+                    }
 
                     if (isVless) {
-                        let tagStr = getConfigName("alpha", p.name, port, hName, ip);
+                        let tagStr = getConfigName("alpha", p.name, port, hName, ip, selectedProxyIp);
                         tagStr = getUniqueName(tagStr);
                         dynamicTags.push(tagStr);
                         
@@ -3190,7 +3339,7 @@ function buildClashJsonProfile(hostName, targetSub = null, allowInsecure = false
                     }
 
                     if (isTrojan) {
-                        let tagStr = getConfigName("beta", p.name, port, hName, ip);
+                        let tagStr = getConfigName("beta", p.name, port, hName, ip, selectedProxyIp);
                         tagStr = getUniqueName(tagStr);
                         dynamicTags.push(tagStr);
 
@@ -3231,6 +3380,7 @@ function buildClashJsonProfile(hostName, targetSub = null, allowInsecure = false
                         }
                         proxiesArr.push(ob);
                     }
+                    configIndex++;
                 });
             });
         });
@@ -3370,11 +3520,12 @@ function buildClashJsonProfile(hostName, targetSub = null, allowInsecure = false
     };
 }
 
-function buildSingBoxJsonProfile(hostName, targetSub = null, allowInsecure = false) {
+async function buildSingBoxJsonProfile(hostName, targetSub = null, allowInsecure = false) {
     let allHostNames = [hostName];
     if (sysConfig.slaveNodes) allHostNames.push(...sysConfig.slaveNodes.split(/[\r\n,;]+/).map(s=>s.trim()).filter(Boolean));
     let ports = sysConfig.socketPorts ? sysConfig.socketPorts.split(',').map(s=>s.trim()).filter(Boolean) : ["443"];
     let profiles = getAllProfiles(targetSub);
+    await preloadIpFlags(profiles, allHostNames);
     let reqPath = encodeURI(`/${sysConfig.apiRoute}`);
 
     let outboundsArr = [];
@@ -3411,21 +3562,31 @@ function buildSingBoxJsonProfile(hostName, targetSub = null, allowInsecure = fal
     };
 
     profiles.forEach(p => {
+        let pips = getProxyIpsArray(p.proxyIp);
+        if (pips.length === 0 && sysConfig.backupRelay) {
+            pips = getProxyIpsArray(sysConfig.backupRelay);
+        }
         let effectiveMode = p.userMode || sysConfig.mode;
         let effectivePorts = p.userPorts ? p.userPorts.split(',').map(s=>s.trim()).filter(Boolean) : ports;
         let maxCfg = p.maxConfigs || null;
 
+        let configIndex = 0;
+
         allHostNames.forEach(hName => {
-            let allIps = getCleanIps(hName, p.proxyIp);
+            let allIps = getCleanIps(hName, p.cleanIp);
             let ips = calcEffectiveIps(allIps, maxCfg, effectiveMode, effectivePorts);
             effectivePorts.forEach(port => {
                 let sec = getTransportParams(port) === "tls";
                 ips.forEach(ip => {
                     let isVless = effectiveMode === "alpha" || effectiveMode === "both";
                     let isTrojan = effectiveMode === "beta" || effectiveMode === "both";
+                    let selectedProxyIp = null;
+                    if (pips.length > 0) {
+                        selectedProxyIp = pips[configIndex % pips.length];
+                    }
 
                     if (isVless) {
-                        let tagStr = getConfigName("alpha", p.name, port, hName, ip);
+                        let tagStr = getConfigName("alpha", p.name, port, hName, ip, selectedProxyIp);
                         tagStr = getUniqueName(tagStr);
                         dynamicTags.push(tagStr);
 
@@ -3466,7 +3627,7 @@ function buildSingBoxJsonProfile(hostName, targetSub = null, allowInsecure = fal
                     }
 
                     if (isTrojan) {
-                        let tagStr = getConfigName("beta", p.name, port, hName, ip);
+                        let tagStr = getConfigName("beta", p.name, port, hName, ip, selectedProxyIp);
                         tagStr = getUniqueName(tagStr);
                         dynamicTags.push(tagStr);
 
@@ -3504,6 +3665,7 @@ function buildSingBoxJsonProfile(hostName, targetSub = null, allowInsecure = fal
                         };
                         outboundsArr.push(ob);
                     }
+                    configIndex++;
                 });
             });
         });
@@ -4065,6 +4227,23 @@ function getDashboardUI(hasDB) {
                                   </button>
                               </div>
                           </div>
+                          <!-- Sub-options for format choice -->
+                          <div class="w-full flex flex-col md:flex-row items-start md:items-center justify-between gap-4 bg-amber-500/5 dark:bg-amber-500/[0.02] p-4 rounded-2xl border border-amber-500/10 mt-2 text-start">
+                              <div class="space-y-1">
+                                  <span class="text-xs font-bold text-amber-800 dark:text-amber-400" data-i18n="lbl_update_format">Update Format & Obfuscation:</span>
+                                  <p class="text-[10px] text-slate-500 dark:text-slate-400" data-i18n="desc_update_format">Deploy clean source code, or encrypt using dynamic XOR byte-shifting to avoid network interception.</p>
+                              </div>
+                              <div class="flex items-center gap-4 shrink-0 font-medium">
+                                  <label class="inline-flex items-center cursor-pointer">
+                                      <input type="radio" name="update-format" value="normal" checked class="form-radio text-amber-500 w-4 h-4">
+                                      <span class="ms-1.5 text-xs text-slate-700 dark:text-slate-300 font-bold" data-i18n="format_normal">Normal (_worker.js)</span>
+                                  </label>
+                                  <label class="inline-flex items-center cursor-pointer">
+                                      <input type="radio" name="update-format" value="obfuscated" class="form-radio text-amber-500 w-4 h-4">
+                                      <span class="ms-1.5 text-xs text-slate-700 dark:text-slate-300 font-bold" data-i18n="format_obfuscated">Obfuscated (UTF-8 + XOR)</span>
+                                  </label>
+                              </div>
+                          </div>
                           <!-- Dynamic Changelog Section -->
                           <div id="update-changelog-area" class="hidden w-full border-t border-amber-300/30 dark:border-amber-950/20 pt-4 mt-2">
                               <h5 class="text-xs font-bold text-amber-800 dark:text-amber-400 mb-2 flex items-center gap-1.5">
@@ -4172,7 +4351,7 @@ function getDashboardUI(hasDB) {
                               <div class="bg-white dark:bg-darkcard rounded-2xl md:rounded-3xl p-4 md:p-6 shadow-sm border border-slate-200 dark:border-darkborder">
                                   <h3 class="text-xs md:text-sm uppercase font-bold text-slate-500 tracking-wider mb-3 md:mb-4" data-i18n="ov_quick_actions">Quick Actions</h3>
                                   <div class="grid grid-cols-2 gap-2 md:grid-cols-1 md:gap-3">
-                                      <button onclick="document.getElementById('modal-add-user').classList.remove('hidden'); buildPortCheckboxes('add-user-ports-wrap', null); buildModeCheckboxes('add-user-mode-wrap', null);" class="flex items-center justify-center md:justify-start gap-2 md:gap-3 px-3 py-2.5 md:px-4 md:py-3 bg-primary/10 hover:bg-primary/20 text-primary rounded-lg md:rounded-xl font-bold text-xs md:text-sm transition-colors">
+                                      <button onclick="openAddUserModal()" class="flex items-center justify-center md:justify-start gap-2 md:gap-3 px-3 py-2.5 md:px-4 md:py-3 bg-primary/10 hover:bg-primary/20 text-primary rounded-lg md:rounded-xl font-bold text-xs md:text-sm transition-colors">
                                           <svg class="w-4 h-4 md:w-5 md:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"></path></svg>
                                           <span data-i18n="ov_add_user">Add User</span>
                                       </button>
@@ -4376,6 +4555,11 @@ function getDashboardUI(hasDB) {
                               <div class="space-y-1 md:col-span-2">
                                   <label class="block text-sm font-bold text-slate-600 dark:text-slate-300 ms-1" data-i18n="lbl_github_repo">GitHub Update Repository</label>
                                   <input type="text" id="cfg-github-repo" placeholder="itsyebekhe/nahan" class="w-full px-4 py-3 rounded-xl border border-slate-200 dark:border-darkborder bg-slate-50 dark:bg-slate-800 focus:border-primary outline-none text-sm">
+                                  <div class="flex justify-start items-center gap-2 mt-2">
+                                      <button type="button" onclick="triggerManualRedeploy()" class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-primary/10 hover:bg-primary/20 text-primary text-xs font-bold rounded-lg transition-colors border border-primary/20">
+                                          🔄 <span data-i18n="btn_redeploy_force">Force Redeploy / Switch Format</span>
+                                      </button>
+                                  </div>
                               </div>
                               <div class="space-y-1 md:col-span-2">
                                   <label class="block text-sm font-bold text-slate-600 dark:text-slate-300 ms-1" data-i18n="lbl_sub_ua">Custom Subscription User-Agent</label>
@@ -4414,6 +4598,10 @@ function getDashboardUI(hasDB) {
                               </div>
                               <textarea id="cfg-ips" rows="3" data-i18n="ph_clean_ips" placeholder="" class="w-full px-4 py-3 rounded-xl border border-slate-200 dark:border-darkborder bg-slate-50 dark:bg-slate-800 focus:border-primary focus:ring-1 outline-none font-mono text-sm resize-none"></textarea>
                               <p class="text-xs text-slate-400 mt-2" data-i18n="desc_clean_ips">Put one IP per line. The Sync URL will multiply configs for all IPs.</p>
+                              <button id="btn-resolve-smart-ips" onclick="resolveSmartCleanIps()" class="mt-3 w-full sm:w-auto px-4 py-2.5 bg-primary/10 hover:bg-primary/20 text-primary border border-primary/20 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2">
+                                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                                  Auto-Resolve CDN & Clean IPs
+                              </button>
                           </div>
                           
                           <!-- Slave Nodes Section -->
@@ -4464,8 +4652,8 @@ function getDashboardUI(hasDB) {
                                   <input type="text" id="cfg-fake" class="w-full px-4 py-3 rounded-xl border border-slate-200 dark:border-darkborder bg-slate-50 dark:bg-slate-800 focus:border-primary outline-none text-sm">
                               </div>
                               <div class="space-y-1 md:col-span-2 text-start">
-                                  <label class="block text-sm font-bold text-slate-600 dark:text-slate-300 ms-1" data-i18n="lbl_relay">Backup Relay IP</label>
-                                  <input type="text" id="cfg-relay" placeholder="proxyip.cmliussss.net" class="w-full px-4 py-3 rounded-xl border border-slate-200 dark:border-darkborder bg-slate-50 dark:bg-slate-800 focus:border-primary outline-none text-sm">
+                                  <label class="block text-sm font-bold text-slate-600 dark:text-slate-300 ms-1" data-i18n="lbl_relay">Proxy IPs (Comma/Newline separated)</label>
+                                  <textarea id="cfg-relay" rows="3" placeholder="104.20.0.1\nproxyip.cmliussss.net" class="w-full px-4 py-3 rounded-xl border border-slate-200 dark:border-darkborder bg-slate-50 dark:bg-slate-800 focus:border-primary focus:ring-1 outline-none font-mono text-sm resize-none"></textarea>
                               </div>
                           </div>
   
@@ -4473,14 +4661,10 @@ function getDashboardUI(hasDB) {
                           <div class="bg-white dark:bg-darkcard rounded-3xl p-6 shadow-sm border border-slate-200 dark:border-darkborder grid grid-cols-1 md:grid-cols-2 gap-5 mt-6">
                               <div class="space-y-1 text-start">
                                   <label class="block text-sm font-bold text-slate-600 dark:text-slate-300 ms-1" data-i18n="lbl_strategy">Configuration Name Strategy</label>
-                                  <select id="cfg-name-strategy" class="w-full px-4 py-3 rounded-xl border border-slate-200 dark:border-darkborder bg-slate-50 dark:bg-slate-800 focus:border-primary outline-none appearance-none">
-                                      <option value="default">Default Core Name (e.g. V-Core-443-User)</option>
-                                      <option value="type-user-port">Protocol-User-Port (e.g. vless-User-443)</option>
-                                      <option value="user-port">User-Port (e.g. User-443)</option>
-                                      <option value="host-port-user">Hostname-Port-User</option>
-                                      <option value="prefix-user-port">Custom Prefix-User-Port</option>
-                                      <option value="ip">IP(x.x.x.x)</option>
-                                  </select>
+                                  <input type="text" id="cfg-name-strategy" placeholder="{FLAG} {PROTOCOL}-{USER}-{PORT}" class="w-full px-4 py-3 rounded-xl border border-slate-200 dark:border-darkborder bg-slate-50 dark:bg-slate-800 focus:border-primary outline-none">
+                                  <p data-i18n="html_desc_strategy" class="text-[11px] text-slate-400 dark:text-slate-500 mt-1 px-1 leading-relaxed">
+                                      Supported pre-defined templates: <code class="bg-slate-100 dark:bg-slate-800/80 px-1 py-0.5 rounded text-rose-500 font-mono">default</code>, <code class="bg-slate-100 dark:bg-slate-800/80 px-1 py-0.5 rounded text-rose-500 font-mono">type-user-port</code>, <code class="bg-slate-100 dark:bg-slate-800/80 px-1 py-0.5 rounded text-rose-500 font-mono">user-port</code>, <code class="bg-slate-100 dark:bg-slate-800/80 px-1 py-0.5 rounded text-rose-500 font-mono">host-port-user</code>, <code class="bg-slate-100 dark:bg-slate-800/80 px-1 py-0.5 rounded text-rose-500 font-mono">prefix-user-port</code>, <code class="bg-slate-100 dark:bg-slate-800/80 px-1 py-0.5 rounded text-rose-500 font-mono">ip</code>.
+                                  </p>
                               </div>
                               <div class="space-y-1 text-start">
                                   <label class="block text-sm font-bold text-slate-600 dark:text-slate-300 ms-1" data-i18n="lbl_prefix">Custom Name Prefix</label>
@@ -4566,6 +4750,36 @@ function getDashboardUI(hasDB) {
                                   <p class="text-xs text-slate-400 mt-1 ms-1" data-i18n="desc_cf_worker">Required for in-panel updates. The script name shown in your Cloudflare Workers dashboard.</p>
                               </div>
                               <p class="text-xs text-slate-400 md:col-span-2" data-i18n="desc_cf_api">Optional: Monitor Worker free usage limits (100k/day). Needs Account Analytics Read permission.</p>
+                              
+                              <!-- Collapsible Step-by-Step Assistant for Beginners -->
+                              <div class="md:col-span-2 mt-2">
+                                  <button type="button" onclick="document.getElementById('cf-helper-guide').classList.toggle('hidden')" class="w-full text-start px-4 py-3 bg-primary/10 hover:bg-primary/15 text-primary text-xs font-bold rounded-xl flex items-center justify-between transition-colors">
+                                      <span class="flex items-center gap-1.5">
+                                          💡 <span data-i18n="cf_help_title">Need help getting these? Beginner's Step-by-Step Guide</span>
+                                      </span>
+                                      <span class="text-[10px] transform transition-transform duration-200">▼</span>
+                                  </button>
+                                  <div id="cf-helper-guide" class="hidden mt-3 p-4 bg-slate-50/50 dark:bg-slate-900/30 border border-slate-200 dark:border-darkborder rounded-2xl text-[11px] space-y-4 text-start leading-relaxed">
+                                      <!-- English Section -->
+                                      <div class="space-y-1 pb-3 border-b border-dashed border-slate-200 dark:border-darkborder">
+                                          <h5 class="font-extrabold text-slate-800 dark:text-slate-200 flex items-center gap-1">🇬🇧 Beginner's Walkthrough:</h5>
+                                          <ol class="list-decimal list-inside space-y-1 text-slate-500 dark:text-slate-400">
+                                              <li><strong>CF API Token:</strong> Click <a href="https://dash.cloudflare.com/profile/api-tokens?template=edit-workers" target="_blank" class="text-primary hover:underline font-bold inline-flex items-center gap-0.5">Api Token Template ↗</a>. Click <strong>Use Template</strong> (if prompted), then scroll down and click <strong>Continue to summary</strong> &gt; <strong>Create Token</strong>. Copy that token and paste it above!</li>
+                                              <li><strong>CF Account ID:</strong> Open any Cloudflare Workers or Domain page in your browser. Look at the URL bar: copy the 32-character string between <code>dash.cloudflare.com/</code> and the next slash (e.g. <code>dash.cloudflare.com/<span class="text-rose-500 font-bold font-mono">YOUR_ACCOUNT_ID</span>/workers</code>).</li>
+                                              <li><strong>Worker Script Name:</strong> Go to <strong class="text-slate-800 dark:text-slate-300">Compute &gt; Workers & Pages</strong> in Cloudflare. Copy your worker's name (e.g. <code>nahan</code> or <code>nahan-gateway</code>).</li>
+                                          </ol>
+                                      </div>
+                                      <!-- Persian Section -->
+                                      <div id="cf-helper-fa" class="space-y-1" style="direction: rtl;">
+                                          <h5 class="font-extrabold text-slate-800 dark:text-slate-200 flex items-center gap-1">🇮🇷 راهنمای مبتدیان فارسی:</h5>
+                                          <ol class="list-decimal list-inside space-y-1 text-slate-500 dark:text-slate-400">
+                                              <li><strong>توکن دسترسی کاربری CF API Token:</strong> روی <a href="https://dash.cloudflare.com/profile/api-tokens?template=edit-workers" target="_blank" class="text-primary hover:underline font-bold inline-flex items-center gap-0.5">لینک میانبر قالب توکن ↗</a> کلیک کنید. در پایین صفحه دکمه <strong>Continue to summary</strong> و سپس <strong>Create Token</strong> را بزنید و توکن نمایش داده شده را کپی کنید.</li>
+                                              <li><strong>شناسه اکانت ابری CF Account ID:</strong> کافیست وارد یکی از صفحات کلودفلر خود شوید. از آدرس بالای مرورگر، عبارت ۳۲ کاراکتری که بلافاصله بعد از <code>dash.cloudflare.com/</code> قرار دارد را بردارید (مثلاً: <code>dash.cloudflare.com/<span class="text-rose-500 font-bold font-mono">a1b2c3d4e5...</span></code>).</li>
+                                              <li><strong>نام کارگر (Worker Name):</strong> از منوی کناری کلودفلر به بخش <strong class="text-slate-800 dark:text-slate-300">Compute &gt; Workers & Pages</strong> رفته و نام ورکر خود را عینا بنویسید (مثلاً <code>nahan</code>).</li>
+                                          </ol>
+                                      </div>
+                                  </div>
+                              </div>
                           </div>
                       </div>
                       
@@ -4645,7 +4859,7 @@ function getDashboardUI(hasDB) {
                                           <option value="auto-disabled" data-i18n="filter_auto_disabled">Auto-Disabled</option>
                                       </select>
                                       <input type="text" id="user-search-input" onkeyup="renderUsersTable()" placeholder="🔍 Find by Name or UUID..." data-i18n="user_search_placeholder" class="bg-slate-50 dark:bg-darkbg border border-slate-200 dark:border-darkborder px-4 py-2.5 rounded-xl text-xs outline-none font-sans text-slate-600 dark:text-slate-400 focus:border-primary">
-                                      <button onclick="document.getElementById('modal-add-user').classList.remove('hidden'); buildPortCheckboxes('add-user-ports-wrap', null); buildModeCheckboxes('add-user-mode-wrap', null);" class="px-4 py-2.5 bg-primary hover:bg-primary/90 text-white rounded-xl text-xs font-bold transition-colors shadow-sm" data-i18n="btn_add_user">+ Add New User</button>
+                                      <button onclick="openAddUserModal()" class="px-4 py-2.5 bg-primary hover:bg-primary/90 text-white rounded-xl text-xs font-bold transition-colors shadow-sm" data-i18n="btn_add_user">+ Add New User</button>
                                   </div>
                               </div>
                               <div class="overflow-x-auto">
@@ -4677,6 +4891,10 @@ function getDashboardUI(hasDB) {
                                       <div>
                                           <label class="block text-xs font-bold text-slate-500 mb-1" data-i18n="lbl_u_name">Name / Identifier</label>
                                           <input type="text" id="add-user-name" class="w-full px-4 py-2 rounded-xl border border-slate-200 dark:border-darkborder bg-slate-50 dark:bg-slate-800 focus:border-primary outline-none">
+                                       </div>
+                                       <div>
+                                           <label class="block text-xs font-bold text-slate-500 mb-1">Custom Config Name / Prefix (Optional)</label>
+                                           <input type="text" id="add-user-custom-name" placeholder="Leave empty to use user name" class="w-full px-4 py-2 rounded-xl border border-slate-200 dark:border-darkborder bg-slate-50 dark:bg-slate-800 focus:border-primary outline-none text-sm">
                                       </div>
                                       <div>
                                           <label class="block text-xs font-bold text-slate-500 mb-1" data-i18n="limit_total">Traffic (GB) Limit (Leave empty for unlimited)</label>
@@ -4691,9 +4909,17 @@ function getDashboardUI(hasDB) {
                                           <input type="number" id="add-user-days" class="w-full px-4 py-2 rounded-xl border border-slate-200 dark:border-darkborder bg-slate-50 dark:bg-slate-800 focus:border-primary outline-none">
                                       </div>
                                       <div>
-                                          <label class="block text-xs font-bold text-slate-500 mb-1" data-i18n="lbl_u_ipproxy">User Proxy IP(s) (Optional - overrides global Clean IP, comma/newline separated)</label>
-                                          <input type="text" id="add-user-proxy-ip" placeholder="e.g. 104.20.0.1, proxyip.com" class="w-full px-4 py-2 rounded-xl border border-slate-200 dark:border-darkborder bg-slate-50 dark:bg-slate-800 focus:border-primary outline-none text-sm">
-                                      </div>
+    <label class="block text-xs font-bold text-slate-500 mb-1">Select Clean IPs</label>
+    <div id="add-user-clean-ips-wrap" class="flex flex-wrap gap-2 mt-1 text-slate-500"></div>
+                                           <label class="block text-[10px] font-bold text-slate-400 mt-2">Or enter Custom Clean IPs (separated by commas or newlines)</label>
+                                           <textarea id="add-user-custom-clean" rows="1" placeholder="e.g. 1.2.3.4, 5.6.7.8" class="w-full mt-1 px-4 py-2 rounded-xl border border-slate-200 dark:border-darkborder bg-slate-50 dark:bg-slate-800 focus:border-primary outline-none text-sm"></textarea>
+ </div>
+ <div>
+    <label class="block text-xs font-bold text-slate-500 mb-1">Select Proxy IPs</label>
+    <div id="add-user-proxy-ips-wrap" class="flex flex-wrap gap-2 mt-1 text-slate-500"></div>
+                                           <label class="block text-[10px] font-bold text-slate-400 mt-2">Or enter Custom Proxy IPs (separated by commas or newlines)</label>
+                                           <textarea id="add-user-custom-proxy" rows="1" placeholder="e.g. proxy1.com:443" class="w-full mt-1 px-4 py-2 rounded-xl border border-slate-200 dark:border-darkborder bg-slate-50 dark:bg-slate-800 focus:border-primary outline-none text-sm"></textarea>
+ </div>
                                       <div>
                                           <label class="block text-xs font-bold text-slate-500 mb-1" data-i18n="lbl_u_Protocol">Protocol Mode</label>
                                           <div id="add-user-mode-wrap" class="flex gap-3 mt-1">
@@ -4732,6 +4958,10 @@ function getDashboardUI(hasDB) {
                                       <div>
                                           <label class="block text-xs font-bold text-slate-500 mb-1" data-i18n="lbl_name_ph">Name / Identifier</label>
                                           <input type="text" id="edit-user-name" class="w-full px-4 py-2 rounded-xl border border-slate-200 dark:border-darkborder bg-slate-50 dark:bg-slate-800 focus:border-primary outline-none">
+                                       </div>
+                                       <div>
+                                           <label class="block text-xs font-bold text-slate-500 mb-1">Custom Config Name / Prefix (Optional)</label>
+                                           <input type="text" id="edit-user-custom-name" placeholder="Leave empty to use user name" class="w-full px-4 py-2 rounded-xl border border-slate-200 dark:border-darkborder bg-slate-50 dark:bg-slate-800 focus:border-primary outline-none text-sm">
                                       </div>
                                       <div>
                                           <label class="block text-xs font-bold text-slate-500 mb-1" data-i18n="limit_total">Total Requests Limit (Leave empty for unlimited)</label>
@@ -4746,9 +4976,17 @@ function getDashboardUI(hasDB) {
                                           <input type="number" id="edit-user-days" class="w-full px-4 py-2 rounded-xl border border-slate-200 dark:border-darkborder bg-slate-50 dark:bg-slate-800 focus:border-primary outline-none">
                                       </div>
                                       <div>
-                                          <label class="block text-xs font-bold text-slate-500 mb-1">User Proxy IP(s) (Optional - overrides global Clean IP, comma/newline separated)</label>
-                                          <input type="text" id="edit-user-proxy-ip" placeholder="e.g. 104.20.0.1, proxyip.com" class="w-full px-4 py-2 rounded-xl border border-slate-200 dark:border-darkborder bg-slate-50 dark:bg-slate-800 focus:border-primary outline-none text-sm">
-                                      </div>
+    <label class="block text-xs font-bold text-slate-500 mb-1">Select Clean IPs</label>
+    <div id="edit-user-clean-ips-wrap" class="flex flex-wrap gap-2 mt-1 text-slate-500"></div>
+                                           <label class="block text-[10px] font-bold text-slate-400 mt-2">Or enter Custom Clean IPs (separated by commas or newlines)</label>
+                                           <textarea id="edit-user-custom-clean" rows="1" placeholder="e.g. 1.2.3.4, 5.6.7.8" class="w-full mt-1 px-4 py-2 rounded-xl border border-slate-200 dark:border-darkborder bg-slate-50 dark:bg-slate-800 focus:border-primary outline-none text-sm"></textarea>
+ </div>
+ <div>
+    <label class="block text-xs font-bold text-slate-500 mb-1">Select Proxy IPs</label>
+    <div id="edit-user-proxy-ips-wrap" class="flex flex-wrap gap-2 mt-1 text-slate-500"></div>
+                                           <label class="block text-[10px] font-bold text-slate-400 mt-2">Or enter Custom Proxy IPs (separated by commas or newlines)</label>
+                                           <textarea id="edit-user-custom-proxy" rows="1" placeholder="e.g. proxy1.com:443" class="w-full mt-1 px-4 py-2 rounded-xl border border-slate-200 dark:border-darkborder bg-slate-50 dark:bg-slate-800 focus:border-primary outline-none text-sm"></textarea>
+ </div>
                                       <div>
                                           <label class="block text-xs font-bold text-slate-500 mb-1" data-i18n="lbl_u_Protocol">Protocol Mode</label>
                                           <div id="edit-user-mode-wrap" class="flex gap-3 mt-1">
@@ -4894,6 +5132,99 @@ function getDashboardUI(hasDB) {
       </div>
   
       <script>
+          function parseImportBindings(importStr) {
+              const cleanStr = importStr.replace(/\\/\\/.*$/gm, '').replace(/\\/\\*[\\s\\S]*?\\*\\//g, '').trim();
+              const content = cleanStr
+                  .replace(/^import\\s+/, '')
+                  .replace(/\\s+from\\s+["'].*?["'];?$/, '')
+                  .trim();
+              
+              const bindings = [];
+              
+              if (content.startsWith('*')) {
+                  const match = content.match(/\\*\\s+as\\s+(\\w+)/);
+                  if (match) bindings.push({ name: match[1], isNamespace: true });
+                  return bindings;
+              }
+              
+              const braceStart = content.indexOf('{');
+              if (braceStart !== -1) {
+                  const defaultPart = content.slice(0, braceStart).replace(/,/, '').trim();
+                  if (defaultPart) {
+                      bindings.push({ name: defaultPart, isDefault: true });
+                  }
+                  const bracePart = content.slice(braceStart + 1, content.lastIndexOf('}')).trim();
+                  const namedImports = bracePart.split(',').map(s => s.trim()).filter(Boolean);
+                  namedImports.forEach(item => {
+                      if (item.includes(' as ')) {
+                          const parts = item.split(/\\s+as\\s+/);
+                           bindings.push({ name: parts[1], original: parts[0] });
+                      } else {
+                          bindings.push({ name: item });
+                      }
+                  });
+              } else {
+                  bindings.push({ name: content, isDefault: true });
+              }
+              
+              return bindings;
+          }
+
+          function obfuscateCode(srcText) {
+              const importRegex = /import\\s+[\\s\\S]*?from\\s+["'].*?["'];?/g;
+              const imports = [];
+              let match;
+              
+              while ((match = importRegex.exec(srcText)) !== null) {
+                  imports.push(match[0]);
+              }
+              
+              let cleanCode = srcText.replace(importRegex, '');
+              
+              const bindings = [];
+              imports.forEach(imp => {
+                  const parsed = parseImportBindings(imp);
+                  bindings.push(...parsed);
+              });
+              
+              const uniqueBindings = [];
+              const seenNames = new Set();
+              bindings.forEach(b => {
+                  if (!seenNames.has(b.name)) {
+                      seenNames.add(b.name);
+                      uniqueBindings.push(b);
+                  }
+              });
+              
+              cleanCode = cleanCode.replace(/export\\s+default\\s+/g, 'const _0xNahanModule = ');
+              cleanCode += '\\nreturn _0xNahanModule;';
+              
+              const randKey = Math.floor(Math.random() * 80) + 64; 
+              
+              const encoder = new TextEncoder();
+              const bytes = encoder.encode(cleanCode);
+              
+              let hexOutput = '';
+              for (let i = 0; i < bytes.length; i++) {
+                  const xorByte = bytes[i] ^ randKey;
+                  hexOutput += xorByte.toString(16).padStart(2, '0');
+               }
+              
+              const rawImportsStr = imports.join('\\n');
+              const bindingNames = uniqueBindings.map(b => b.name);
+              
+              const finalLoaderCode = rawImportsStr + '\\n\\n' +
+                  '// Nahan Gateway - Obfuscated Loader Context (v2.5.4.2 Optimized)\\n' +
+                  'const _0xNahanPayload = "' + hexOutput + '";\\n' +
+                  'const _0xNahanKey = ' + randKey + ';\\n\\n' +
+                  'const _0xNahanBytes = new Uint8Array((_0xNahanPayload.match(/.{1,2}/g) || []).map(x => parseInt(x, 16) ^ _0xNahanKey));\\n' +
+                  'const _0xNahanCode = new TextDecoder().decode(_0xNahanBytes);\\n' +
+                  'const _0xNahanRuntime = new Function(' + bindingNames.map(name => '"' + name + '"').join(', ') + ', _0xNahanCode)(' + bindingNames.join(', ') + ');\\n\\n' +
+                  'export default _0xNahanRuntime;';
+
+              return finalLoaderCode;
+          }
+
           const CURRENT_VERSION = "${CURRENT_VERSION}";
           const i18n = {
               en: {
@@ -4939,7 +5270,14 @@ function getDashboardUI(hasDB) {
                    update_success: "Update successful! Reloading...", update_error: "Update failed",
                    lbl_cf_worker: "CF Worker Script Name", desc_cf_worker: "Required for in-panel updates. The script name shown in your Cloudflare Workers dashboard.",
                    view_github: "View on GitHub",
+                    cf_help_title: "Need help getting these? Beginner's Step-by-Step Guide",
+                    lbl_update_format: "Update Format & Obfuscated Options:",
+                    desc_update_format: "Deploy clean source code, or encrypt using dynamic XOR byte-shifting to avoid network interception.",
+                    format_normal: "Normal (_worker.js)",
+                    format_obfuscated: "Obfuscated (UTF-8 + XOR)",
+                    btn_redeploy_force: "Force Redeploy / Switch Format",
                    update_requires_cf: "Set CF Account ID, API Token, and Worker Name to enable in-panel deploy.",
+                   html_desc_strategy: "Supported placeholders: <code class='bg-slate-100 dark:bg-slate-800/80 px-1 py-0.5 rounded text-rose-500 font-mono'>{FLAG}</code>, <code class='bg-slate-100 dark:bg-slate-800/80 px-1 py-0.5 rounded text-rose-500 font-mono'>{PROTOCOL}</code>, <code class='bg-slate-100 dark:bg-slate-800/80 px-1 py-0.5 rounded text-rose-500 font-mono'>{USER}</code>, <code class='bg-slate-100 dark:bg-slate-800/80 px-1 py-0.5 rounded text-rose-500 font-mono'>{PORT}</code>, <code class='bg-slate-100 dark:bg-slate-800/80 px-1 py-0.5 rounded text-rose-500 font-mono'>{PREFIX}</code>, <code class='bg-slate-100 dark:bg-slate-800/80 px-1 py-0.5 rounded text-rose-500 font-mono'>{IP}</code>.<br><span class='text-[10px] text-slate-400 dark:text-slate-500 leading-snug'>• <b>{FLAG}</b>: Country flag emoji (e.g. 🇺🇸).<br>• <b>{PROTOCOL}</b>: Core mode (VLESS / Trojan).<br>• <b>{USER}</b>: Subscriber name.<br>• <b>{PORT}</b>: Active port.<br>• <b>{PREFIX}</b>: Custom prefix.<br>• <b>{IP}</b>: Clean IP address.</span><br>Pre-defined strategies: <code>default</code>, <code>type-user-port</code>, <code>user-port</code>, <code>host-port-user</code>, <code>prefix-user-port</code>, <code>ip</code>.",
                },
               fa: {
                   title: "دروازه نهان", pass_ph: "کلید اصلی", login_btn: "ورود به سیستم", err_pass: "دسترسی مسدود شد", missing_db: "⚠️ فضای پایگاه داده یافت نشد! تنظیمات ذخیره نمی‌شوند.",
@@ -4960,6 +5298,12 @@ function getDashboardUI(hasDB) {
                   save_btn: "ذخیره تنظیمات", msg_saving: "در حال ثبت...", msg_saved: "موفق! در حال بارگذاری...", msg_err: "خطای ارتباط",
                   backup_restore_title: "پشتیبان‌گیری و بازیابی", ping_test_title: "عیب‌یابی تاخیر شبکه", ping_test_desc: "تاخیر پاسخ‌دهی را به آی‌پی تمیز فعال اندازه بگیرید.",
                   lbl_github_repo: "مخزن منبع جهت بروزرسانی", update_avail: "بروزرسانی جدید در دسترس است!", update_btn: "دریافت آخرین کد",
+                    cf_help_title: "آموزش بدست آوردن این اطلاعات برای کاربران مبتدی",
+                    lbl_update_format: "قالب بروزرسانی و حذف ردگیری:",
+                    desc_update_format: "سورس کد معمولی را دپلوی کنید یا از مبهم‌سازی بایت‌ها با کلید متغیر XOR برای عدم فیلترینگ استفاده نمایید.",
+                    format_normal: "معمولی (_worker.js)",
+                    format_obfuscated: "مبهم‌سازی شده (UTF-8 + XOR)",
+                    btn_redeploy_force: "تفویض مجدد / تغییر قالب پنل",
                   metrics_live: "وضعیت زنده مصرف اتصالات و پردازش", no_metrics: "هنوز داده‌ای از تراکنش و اتصالات فعال ثبت نشده است.", run_diagnostics: "⚡ اجرای عیب‌یابی شبکه",
                   target_node: "هدف گره شبکه", response: "مدت زمان تاخیر پاسخگویی", status: "وضعیت گره", local_port: "درگاه محلی",
                   lbl_doh: "تحلیل‌گر تخصصی آدرس‌یابی عددی", lbl_strategy: "روش نام‌گذاری کانفیگ‌ها", lbl_prefix: "پیشوند نام کانفیگ‌ها",
@@ -4992,10 +5336,55 @@ function getDashboardUI(hasDB) {
                       lbl_cf_worker: "نام اسکریپت کارگر ابری", desc_cf_worker: "برای بروزرسانی خودکار الزامی است. نام اسکریپت در داشبورد کارگرهای ابری.",
                       view_github: "مشاهده در گیت‌هاب",
                      update_requires_cf: "برای نصب خودکار، شناسه اکانت، توکن API و نام کارگر را تنظیم کنید.",
+                     html_desc_strategy: "متغیرهای پشتیبانی شده: <code class='bg-slate-100 dark:bg-slate-800/80 px-1 py-0.5 rounded text-rose-500 font-mono'>{FLAG}</code>، <code class='bg-slate-100 dark:bg-slate-800/80 px-1 py-0.5 rounded text-rose-500 font-mono'>{PROTOCOL}</code>، <code class='bg-slate-100 dark:bg-slate-800/80 px-1 py-0.5 rounded text-rose-500 font-mono'>{USER}</code>، <code class='bg-slate-100 dark:bg-slate-800/80 px-1 py-0.5 rounded text-rose-500 font-mono'>{PORT}</code>، <code class='bg-slate-100 dark:bg-slate-800/80 px-1 py-0.5 rounded text-rose-500 font-mono'>{PREFIX}</code>، <code class='bg-slate-100 dark:bg-slate-800/80 px-1 py-0.5 rounded text-rose-500 font-mono'>{IP}</code>.<br><span class='text-[10px] text-slate-400 dark:text-slate-500 leading-snug'>• <b>{FLAG}</b>: ایموجی پرچم مربوط به کشور آی‌پی لبه (مثلاً 🇺🇸).<br>• <b>{PROTOCOL}</b>: پروتکل اصلی هسته (VLESS / Trojan).<br>• <b>{USER}</b>: نام یا شناسه مشترک ساب.<br>• <b>{PORT}</b>: پورت فعال اتصال.<br>• <b>{PREFIX}</b>: پیشوند نام دلخواه.<br>• <b>{IP}</b>: آدرس آی‌پی تمیز.</span><br>طرح‌های از پیش تعریف شده: <code>default</code>، <code>type-user-port</code>، <code>user-port</code>، <code>host-port-user</code>، <code>prefix-user-port</code>، <code>ip</code>.",
                 }
           };
 
           const CHANGELOG_DATA = {
+              "2.5.7": {
+                  headline: { en: "Dynamic Multi-IP Failover & Keyless Country Flagging", fa: "لینک هوشمند آی‌پی‌ها، بهبود کلودفلر و نگاشت پرچم بدون تحریم" },
+                  added: [
+                      { en: "Support entering custom clean IPs, proxy IPs, and custom config names for each subscriber dynamically in Add/Edit user modals, with automatic extraction and seamless database merging", fa: "امکان ثبت آی‌پی تمیز دلخواه، آی‌پی پروکسی دلخواه و نام کانفیگ دلخواه برای هر کاربر به صورت مجزا با قابلیت استخراج خودکار و ادغام هوشمند" },
+                      { en: "Integrated free, open-source and keyless api.country.is for country flag mapping of IP addresses", fa: "یکپارچه‌سازی وب‌سرویس رایگان و متن‌باز api.country.is جهت نگاشت پرچم کشورهای مربوط به آدرس‌های آی‌پی" }
+                  ],
+                  fixed: [
+                      { en: "Resolved Cloudflare API compatibility flag error ('No such compatibility flag: unsafe-eval' and startup 'Uncaught EvalError') by updating to 'allow_eval_during_startup'", fa: "رفع خطای ناسازگاری فلگ کلودفلر (خطای عدم وجود فلگ unsafe-eval و خطای زمان شروع کار EvalError) در بخش استقرار خودکار با بازنویسی به فلگ مدرن allow_eval_during_startup" },
+                      { en: "Fixed a critical issue where selecting multiple proxy IPs for a user caused session disruptions (IP splitting) on sites behind Cloudflare, resolved via user-consistent hashing and smart proxy failover", fa: "رفع مشکل عدم باز شدن وب‌سایت‌های پشت کلودفلر هنگام انتخاب چندین آی‌پی پروکسی با پیاده‌سازی مکانیزم Hashing پایدار کاربر و سوییچ خودکار (Failover) بر روی پروکسی‌های جایگزین" },
+                      { en: "Fixed client-side regular expression parsing to correctly split global IPs separated by backslashes, tabs, commas, or semicolons in the browser", fa: "اصلاح عبارات منظم فرانت‌اند در مروگر جهت تفکیک صحیح لیست آی‌پی‌های تفکیک شده با اینتر، ویرگول، نقطه ویرگول یا بک‌اسلش" }
+                  ],
+                  improved: [
+                      { en: "Enhanced reliability of user management dashboard modals and subscription validation logic", fa: "بهبود پایداری پنجره‌های مدیریتی داشبورد و منطق بررسی اعتبار اشتراک‌ها" }
+                  ],
+                  notes: []
+              },
+              "2.5.6.1": {
+                  headline: { en: "Multi-IP Management & Crucial Bug Fixes", fa: "مدیریت آی‌پی‌های چندگانه و رفع خطاهای بحرانی" },
+                  added: [
+                      { en: "Support setting custom config name, custom proxy IP, and custom clean IP for each user dynamically in the Add User modal", fa: "اضافه شدن امکان ثبت نام کانفیگ دلخواه، آی‌پی پروکسی اختصاصی و آی‌پی تمیز اختصاصی به صورت مجزا برای هر کاربر در پنجره افزودن کاربر" }
+                  ],
+                  fixed: [
+                      { en: "Fixed a critical JavaScript rollback error ('ReferenceError: proxyIp is not defined') when adding a new user", fa: "رفع خطای بحرانی جاوااسکریپت ('ReferenceError: proxyIp is not defined') هنگام تلاش برای افزودن یک کاربر جدید" }
+                  ],
+                  improved: [
+                      { en: "Streamlined alignment of custom user values with subscription generation", fa: "بهبود همگام‌سازی مقادیر اختصاصی کاربران با فرایند ساخت کانفیگ‌ها در اشتراک" }
+                  ],
+                  notes: []
+              },
+              "2.5.6": {
+                  headline: { en: "Multiple Proxy IPs & Flag Matching", fa: "آی‌پی‌های پروکسی متعدد و انطباق پرچم" },
+                  added: [
+                      { en: "Support multi-proxy IP lists (rotated/distributed across generated configs to bypass Cloudflare limits)", fa: "پشتیبانی از لیست‌های آی‌پی پروکسی چندگانه (چرخش و توزیع خودکار میان کانفیگ‌ها برای عبور از محدودیت‌های کلودفلر)" },
+                      { en: "Proper country flag matching for configs based on the actual proxy IP used", fa: "انطباق صحیح پرچم کشور برای کانفیگ‌ها بر اساس آی‌پی پروکسی واقعی استفاده‌شده" }
+                  ],
+                  fixed: [
+                      { en: "Fixed outbound transport and websocket configurations formatting errors", fa: "رفع خطاهای فرمت‌دهی در کانفیگ‌های حمل و نقل خروجی و وب‌ساکت" }
+                  ],
+                  improved: [
+                      { en: "Distributed multiple proxy IPs evenly across subscription sub-configs", fa: "توزیع یکنواخت چندین آی‌پی پروکسی میان زیرکانفیگ‌های اشتراک" },
+                      { en: "Enhanced IP API resolving and flag caching logic", fa: "بهبود منطق حل‌وفصل و کش پرچم برای آی‌پی‌ها" }
+                  ],
+                  notes: []
+              },
               "2.5.5": {
                   headline: { en: "One-Click Panel Update", fa: "بروزرسانی پنل با یک کلیک" },
                   added: [
@@ -5224,7 +5613,11 @@ function getDashboardUI(hasDB) {
                       if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
                           el.placeholder = i18n[lang][key];
                       } else {
-                          el.innerText = i18n[lang][key];
+                          if (key.startsWith('html_')) {
+                              el.innerHTML = i18n[lang][key];
+                          } else {
+                              el.innerText = i18n[lang][key];
+                          }
                       }
                   }
               });
@@ -5236,7 +5629,19 @@ function getDashboardUI(hasDB) {
               const statTrafficEl = document.getElementById('stat-total-traffic');
               if (statTrafficEl && statTrafficEl.textContent.trim() === '0 GB') statTrafficEl.textContent = '0 ' + gbUnit;
           }
-          function toggleLang() { lang = lang === 'fa' ? 'en' : 'fa'; localStorage.setItem('lang', lang); applyLang(); updateTitle(); updateUI(); }
+          function toggleLang() { 
+              lang = lang === 'fa' ? 'en' : 'fa'; 
+              localStorage.setItem('lang', lang); 
+              applyLang(); 
+              updateTitle(); 
+              updateUI(); 
+              try {
+                  const m = document.getElementById('modal-version-update');
+                  if (m && !m.classList.contains('hidden')) {
+                      renderChangelog(CURRENT_VERSION);
+                  }
+              } catch(e){}
+          }
           applyLang();
   
           if (localStorage.getItem('theme') === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
@@ -6048,7 +6453,48 @@ function getDashboardUI(hasDB) {
               return (window.nahanConfig && window.nahanConfig.mode) ? window.nahanConfig.mode : 'alpha';
           }
 
-          function buildPortCheckboxes(wrapId, selectedPorts) {
+          function openAddUserModal() {
+              document.getElementById('modal-add-user').classList.remove('hidden');
+              buildPortCheckboxes('add-user-ports-wrap', null);
+              buildModeCheckboxes('add-user-mode-wrap', null);
+              buildIPCheckboxes("add-user-clean-ips-wrap", "", (window.nahanConfig?.cleanIps||"").split(/[\\s,;]+/).map(s=>s.trim()).filter(Boolean));
+              buildIPCheckboxes("add-user-proxy-ips-wrap", "", (window.nahanConfig?.backupRelay||"").split(/[\\s,;]+/).map(s=>s.trim()).filter(Boolean));
+          }
+
+          
+function buildIPCheckboxes(wrapId, selectedIps, allIps) {
+    const wrap = document.getElementById(wrapId);
+    if(!wrap) return;
+    wrap.innerHTML = '';
+    if(!allIps || allIps.length === 0) {
+        wrap.innerHTML = '<span class="text-xs text-slate-400">No IPs added in Advanced Tab</span>';
+        return;
+    }
+    const selArr = selectedIps ? selectedIps.split(',').map(s=>s.trim()).filter(Boolean) : [];
+    allIps.forEach(ip => {
+        const lbl = document.createElement('label');
+        lbl.className = "flex items-center gap-1.5 text-sm cursor-pointer border border-slate-200 dark:border-darkborder px-2 py-1 rounded-lg";
+        const cb = document.createElement('input');
+        cb.type = "checkbox";
+        cb.className = "accent-primary";
+        cb.value = ip;
+        if(selArr.includes(ip)) cb.checked = true;
+        
+        lbl.appendChild(cb);
+        const span = document.createElement('span');
+        span.innerText = ip;
+        lbl.appendChild(span);
+        wrap.appendChild(lbl);
+    });
+}
+function getSelectedCheckboxes(wrapId) {
+    const wrap = document.getElementById(wrapId);
+    if(!wrap) return '';
+    const checked = Array.from(wrap.querySelectorAll('input:checked')).map(cb => cb.value);
+    return checked.join(',');
+}
+
+function buildPortCheckboxes(wrapId, selectedPorts) {
               const wrap = document.getElementById(wrapId);
               if (!wrap) return;
               const globalPorts = getGlobalPorts();
@@ -6092,7 +6538,24 @@ function getDashboardUI(hasDB) {
               let dReq = document.getElementById('add-user-daily-reqs').value;
               dReq = dReq? Math.floor(parseFloat(dReq) * 6000): null;
               let days = document.getElementById('add-user-days').value;
-              const proxyIp = document.getElementById('add-user-proxy-ip').value || null;
+               const cleanIpsCheckbox = getSelectedCheckboxes("add-user-clean-ips-wrap");
+               const cleanIpsCustom = document.getElementById("add-user-custom-clean").value.trim();
+               let cleanIpArray = [];
+               if (cleanIpsCheckbox) cleanIpArray.push(...cleanIpsCheckbox.split(','));
+               if (cleanIpsCustom) {
+                   cleanIpArray.push(...cleanIpsCustom.split(/[\\s,;]+/).map(s=>s.trim()).filter(Boolean));
+               }
+               const cleanIp = cleanIpArray.length ? cleanIpArray.join(',') : null;
+               const proxyIpsCheckbox = getSelectedCheckboxes("add-user-proxy-ips-wrap");
+               const proxyIpsCustom = document.getElementById("add-user-custom-proxy").value.trim();
+               let proxyIpArray = [];
+               if (proxyIpsCheckbox) proxyIpArray.push(...proxyIpsCheckbox.split(','));
+               if (proxyIpsCustom) {
+                   proxyIpArray.push(...proxyIpsCustom.split(/[\\s,;]+/).map(s=>s.trim()).filter(Boolean));
+               }
+               const proxyIp = proxyIpArray.length ? proxyIpArray.join(',') : null;
+               
+               const customName = document.getElementById('add-user-custom-name').value.trim() || null;
               const userMode = readModeFromCheckboxes('add-mode-cb');
               const userPorts = readPortsFromCheckboxes('add-user-ports-wrap');
               let maxConfigs = document.getElementById('add-user-max-configs').value;
@@ -6125,6 +6588,8 @@ function getDashboardUI(hasDB) {
                    limitDailyReq: dReq,
                    expiryMs: days ? Date.now() + days*86400000 : null,
                    proxyIp: proxyIp,
+                    cleanIp: cleanIp,
+                    customName: customName,
                    userMode: userMode,
                    userPorts: userPorts,
                    maxConfigs: maxConfigs,
@@ -6134,10 +6599,12 @@ function getDashboardUI(hasDB) {
               window.nahanConfig.users.push(u);
               document.getElementById('modal-add-user').classList.add('hidden');
               document.getElementById('add-user-name').value = '';
+               document.getElementById('add-user-custom-name').value = '';
+               document.getElementById('add-user-custom-clean').value = '';
+               document.getElementById('add-user-custom-proxy').value = '';
               document.getElementById('add-user-total-reqs').value = '';
               document.getElementById('add-user-daily-reqs').value = '';
               document.getElementById('add-user-days').value = '';
-              document.getElementById('add-user-proxy-ip').value = '';
               document.getElementById('add-user-max-configs').value = '';
               
               renderUsersTable();
@@ -6153,7 +6620,34 @@ function getDashboardUI(hasDB) {
               document.getElementById('edit-user-name').value = u.name;
               document.getElementById('edit-user-total-reqs').value = u.limitTotalReq? (u.limitTotalReq / 6000).toFixed(2): '';
               document.getElementById('edit-user-daily-reqs').value = u.limitDailyReq? (u.limitDailyReq / 6000).toFixed(2): '';
-              document.getElementById('edit-user-proxy-ip').value = u.proxyIp || '';
+                            const globalCleanIps = (window.nahanConfig?.cleanIps||"").split(/[\\r\\n,;]+/).map(s=>s.trim()).filter(Boolean);
+              const userCleanIps = (u.cleanIp || "").split(/[\\r\\n,;]+/).map(s=>s.trim()).filter(Boolean);
+              const checkedGlobalClean = [];
+              const customClean = [];
+              userCleanIps.forEach(ip => {
+                  let hostOnly = ip.split('#')[0].split(':')[0].trim();
+                  let isFound = globalCleanIps.some(g => g.split('#')[0].split(':')[0].trim() === hostOnly || g === ip);
+                  if (isFound) checkedGlobalClean.push(ip);
+                  else customClean.push(ip);
+              });
+              buildIPCheckboxes("edit-user-clean-ips-wrap", checkedGlobalClean.join(','), globalCleanIps);
+              document.getElementById('edit-user-custom-clean').value = customClean.join(', ');
+
+              const globalProxyIps = (window.nahanConfig?.backupRelay||"").split(/[\\r\\n,;]+/).map(s=>s.trim()).filter(Boolean);
+              const userProxyIps = (u.proxyIp || "").split(/[\\r\\n,;]+/).map(s=>s.trim()).filter(Boolean);
+              const checkedGlobalProxy = [];
+              const customProxy = [];
+              userProxyIps.forEach(ip => {
+                  let hostOnly = ip.split('#')[0].split(':')[0].trim();
+                  let isFound = globalProxyIps.some(g => g.split('#')[0].split(':')[0].trim() === hostOnly || g === ip);
+                  if (isFound) checkedGlobalProxy.push(ip);
+                  else customProxy.push(ip);
+              });
+              buildIPCheckboxes("edit-user-proxy-ips-wrap", checkedGlobalProxy.join(','), globalProxyIps);
+              document.getElementById('edit-user-custom-proxy').value = customProxy.join(', ');
+              
+              document.getElementById('edit-user-custom-name').value = u.customName || '';
+              
               document.getElementById('edit-user-max-configs').value = u.maxConfigs || '';
               
               buildPortCheckboxes('edit-user-ports-wrap', u.userPorts);
@@ -6177,7 +6671,24 @@ function getDashboardUI(hasDB) {
               let dReq = document.getElementById('edit-user-daily-reqs').value;
               dReq = dReq? Math.floor(parseFloat(dReq) * 6000): null;
               let days = document.getElementById('edit-user-days').value;
-              const proxyIp = document.getElementById('edit-user-proxy-ip').value || null;
+                             const proxyIpsCheckbox = getSelectedCheckboxes("edit-user-proxy-ips-wrap");
+               const proxyIpsCustom = document.getElementById("edit-user-custom-proxy").value.trim();
+               let proxyIpArray = [];
+               if (proxyIpsCheckbox) proxyIpArray.push(...proxyIpsCheckbox.split(','));
+               if (proxyIpsCustom) {
+                   proxyIpArray.push(...proxyIpsCustom.split(/[\\s,;]+/).map(s=>s.trim()).filter(Boolean));
+               }
+               const proxyIp = proxyIpArray.length ? proxyIpArray.join(',') : null;
+               
+               const customName = document.getElementById('edit-user-custom-name').value.trim() || null;
+               const cleanIpsCheckbox = getSelectedCheckboxes("edit-user-clean-ips-wrap");
+               const cleanIpsCustom = document.getElementById("edit-user-custom-clean").value.trim();
+               let cleanIpArray = [];
+               if (cleanIpsCheckbox) cleanIpArray.push(...cleanIpsCheckbox.split(','));
+               if (cleanIpsCustom) {
+                   cleanIpArray.push(...cleanIpsCustom.split(/[\\s,;]+/).map(s=>s.trim()).filter(Boolean));
+               }
+               const cleanIp = cleanIpArray.length ? cleanIpArray.join(',') : null;
               const userMode = readModeFromCheckboxes('edit-mode-cb');
               const userPorts = readPortsFromCheckboxes('edit-user-ports-wrap');
               let maxConfigs = document.getElementById('edit-user-max-configs').value;
@@ -6206,6 +6717,8 @@ function getDashboardUI(hasDB) {
               u.limitDailyReq = dReq;
               u.expiryMs = days ? Date.now() + days*86400000 : null;
               u.proxyIp = proxyIp;
+               u.cleanIp = cleanIp;
+               u.customName = customName;
               u.userMode = userMode;
               u.userPorts = userPorts;
               u.maxConfigs = maxConfigs;
@@ -6233,6 +6746,80 @@ function getDashboardUI(hasDB) {
               btn.innerText = origText;
           }
 
+          async function resolveSmartCleanIps() {
+              const btn = document.getElementById('btn-resolve-smart-ips');
+              const origText = btn.innerHTML;
+              btn.disabled = true;
+              btn.innerHTML = '⚡ Resolving CDN & Clean IPs...';
+              
+              const domains = [
+                  'www.speedtest.net',
+                  'grok.com',
+                  'feedback.spotify.com',
+                  'www.hcaptcha.com',
+                  'chatgpt.com',
+                  'sourceforge.net',
+                  'snapp.ir',
+                  'digikala.com',
+                  'divar.ir',
+                  'cafebazaar.ir',
+                  'shaparak.ir',
+                  'aparat.com',
+                  'soft98.ir',
+                  'varzesh3.com'
+              ];
+              
+              let resolvedIps = new Set();
+              const cleanIpsTextarea = document.getElementById('cfg-ips');
+              
+              async function resolveOne(domain) {
+                  try {
+                      const res = await fetch(\`https://cloudflare-dns.com/dns-query?name=\${encodeURIComponent(domain)}&type=A\`, { 
+                          headers: { 'accept': 'application/dns-json' }
+                      });
+                      const data = await res.json();
+                      if (data && data.Answer) {
+                          data.Answer.forEach(ans => {
+                              if (ans.type === 1 && ans.data) {
+                                  resolvedIps.add(ans.data);
+                              }
+                          });
+                      }
+                  } catch(e) {
+                      try {
+                          const res = await fetch(\`https://dns.google/resolve?name=\${encodeURIComponent(domain)}&type=A\`);
+                          const data = await res.json();
+                          if (data && data.Answer) {
+                              data.Answer.forEach(ans => {
+                                  if (ans.type === 1 && ans.data) {
+                                      resolvedIps.add(ans.data);
+                                  }
+                              });
+                          }
+                      } catch(ge) {}
+                  }
+              }
+              
+              try {
+                  await Promise.all(domains.map(d => resolveOne(d)));
+              } catch(err) {
+                  console.error("DNS resolving process encountered an issue:", err);
+              }
+              
+              if (resolvedIps.size > 0) {
+                  const ipList = Array.from(resolvedIps).join('\\n');
+                  cleanIpsTextarea.value = ipList;
+                  cleanIpsTextarea.dispatchEvent(new Event('input'));
+                  cleanIpsTextarea.dispatchEvent(new Event('change'));
+                  alert('Successfully resolved and loaded ' + resolvedIps.size + ' clean IPs!');
+              } else {
+                  alert('Failed to resolve domains to IPs. Please verify your internet connection or custom DNS.');
+              }
+              
+              btn.disabled = false;
+              btn.innerHTML = origText;
+          }
+
           async function checkUpdate() {
               try {
                   const res = await fetch(baseRoute + '/api/update', {
@@ -6243,7 +6830,7 @@ function getDashboardUI(hasDB) {
                   const data = await res.json();
                   if (data.success && data.updateAvailable) {
                       window._updateData = data;
-                      showUpdateBanner((document.getElementById('cfg-github-repo')?.value || window.nahanConfig?.githubRepo || 'itsyebekhe/nahan').replace(/https?:\\/\\/github\\.com\\//, '').trim(), data.latest);
+                      showUpdateBanner((document.getElementById('cfg-github-repo')?.value || window.nahanConfig?.githubRepo || 'itsyebekhe/nahan').replace('https://github.com/', '').replace('http://github.com/', '').trim(), data.latest);
                   }
                   if (data.success && !data.canDeploy) {
                       const statusEl = document.getElementById('update-deploy-status');
@@ -6262,7 +6849,11 @@ function getDashboardUI(hasDB) {
               const btn = document.getElementById('update-deploy-btn');
               const statusEl = document.getElementById('update-deploy-status');
               if (!btn) return;
-              if (!confirm(lang === 'fa' ? 'آیا از نصب بروزرسانی اطمینان دارید؟' : 'Deploy the latest version now?')) return;
+              if (!confirm(lang === 'fa' ? 'آیا از دپلوی نسخه فعلی/جدید اطمینان دارید؟' : 'Deploy the selected version now?')) return;
+
+              const formatEl = document.querySelector('input[name="update-format"]:checked');
+              const format = formatEl ? formatEl.value : 'normal';
+              const forceDeploy = !window._updateData?.updateAvailable;
 
               const origText = btn.innerHTML;
               btn.innerHTML = '⏳ ' + (i18n[lang].update_deploying || 'Deploying...');
@@ -6273,11 +6864,42 @@ function getDashboardUI(hasDB) {
                   statusEl.textContent = i18n[lang].update_deploying || 'Deploying update...';
               }
 
+              let latestCode = null;
+              try {
+                  const repo = (document.getElementById('cfg-github-repo')?.value || window.nahanConfig?.githubRepo || 'itsyebekhe/nahan').replace('https://github.com/', '').replace('http://github.com/', '').trim();
+                  if (statusEl) statusEl.textContent = '📥 ' + (lang === 'fa' ? 'در حال دریافت کد از مخزن گیت‌هاب...' : 'Fetching latest code from GitHub...');
+                  const fetchRes = await fetch('https://raw.githubusercontent.com/' + repo + '/main/_worker.js');
+                  if (!fetchRes.ok) throw new Error('HTTP ' + fetchRes.status);
+                  latestCode = await fetchRes.text();
+              } catch(fe) {
+                  console.warn("Client fetch failed, falling back to server-side fetch", fe);
+              }
+
+              if (latestCode && format === 'obfuscated') {
+                  if (statusEl) statusEl.textContent = '🛡️ ' + (lang === 'fa' ? 'در حال اجرای مبهم‌سازی کلاینت...' : 'Applying client-side XOR obfuscation...');
+                  try {
+                      latestCode = obfuscateCode(latestCode);
+                  } catch(oe) {
+                      if (statusEl) {
+                          statusEl.className = 'w-full mt-3 p-3 rounded-xl text-sm font-bold text-center text-red-600 bg-red-50 dark:bg-red-900/20 dark:text-red-400';
+                          statusEl.textContent = 'Obfuscation failed: ' + oe.message;
+                      }
+                      btn.innerHTML = origText;
+                      btn.disabled = false;
+                      return;
+                  }
+              }
+
               try {
                   const res = await fetch(baseRoute + '/api/update', {
                       method: 'POST',
                       headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ key: sessionKey, action: 'deploy' })
+                      body: JSON.stringify({ 
+                          key: sessionKey, 
+                          action: 'deploy',
+                          code: latestCode,
+                          force: forceDeploy
+                      })
                   });
                   const data = await res.json();
                   if (data.success) {
@@ -6295,14 +6917,37 @@ function getDashboardUI(hasDB) {
                       btn.innerHTML = origText;
                       btn.disabled = false;
                   }
-              } catch(err) {
+              } catch(e) {
                   if (statusEl) {
                       statusEl.className = 'w-full mt-3 p-3 rounded-xl text-sm font-bold text-center text-red-600 bg-red-50 dark:bg-red-900/20 dark:text-red-400';
-                      statusEl.textContent = (i18n[lang].update_error || 'Update failed') + ': ' + err.message;
+                      statusEl.textContent = 'Error: ' + e.message;
                   }
                   btn.innerHTML = origText;
                   btn.disabled = false;
               }
+          }
+
+          async function triggerManualRedeploy() {
+              const banner = document.getElementById('update-alert-banner');
+              if (!banner) return;
+              
+              document.getElementById('update-alert-text').textContent = lang === 'fa' 
+                  ? 'می‌توانید آخرین نسخه فعال را مجدداً دپلوی نموده یا بین نسخه معمولی و مبهم‌سازی شده جابجا شوید.'
+                  : 'You can redeploy the latest code or switch between Normal/Obfuscated version on the fly.';
+              
+              banner.classList.remove('hidden');
+              banner.classList.add('flex');
+              
+              if (!window._updateData) {
+                  window._updateData = { latest: CURRENT_VERSION, updateAvailable: false };
+              }
+              
+              const repo = (document.getElementById('cfg-github-repo')?.value || window.nahanConfig?.githubRepo || 'itsyebekhe/nahan').replace('https://github.com/', '').replace('http://github.com/', '').trim();
+              
+              showUpdateBanner(repo, CURRENT_VERSION);
+              
+              switchTab('overview');
+              document.getElementById('update-alert-banner').scrollIntoView({ behavior: 'smooth' });
           }
           
           function parseMarkdown(md) {
@@ -6311,9 +6956,31 @@ function getDashboardUI(hasDB) {
               let htmlLines = [];
               let inCodeBlock = false;
               let codeContent = [];
+              let activeBlockLang = null;
 
               for (let line of lines) {
                   let trimmed = line.trim();
+
+                  if (trimmed === '<!-- LANG:EN -->' || trimmed === '<!--LANG:EN-->') {
+                      if (activeBlockLang === 'en') {
+                          activeBlockLang = null;
+                      } else {
+                          activeBlockLang = 'en';
+                      }
+                      continue;
+                  }
+                  if (trimmed === '<!-- LANG:FA -->' || trimmed === '<!--LANG:FA-->') {
+                      if (activeBlockLang === 'fa') {
+                          activeBlockLang = null;
+                      } else {
+                          activeBlockLang = 'fa';
+                      }
+                      continue;
+                  }
+
+                  if (activeBlockLang !== null && activeBlockLang !== lang) {
+                      continue;
+                  }
 
                   // Toggle code block
                   if (trimmed.startsWith('\\x60\\x60\\x60')) {
@@ -6510,7 +7177,7 @@ function getDashboardUI(hasDB) {
               const b = document.getElementById('update-alert-banner');
               if (b) {
                   b.classList.remove('flex');
-                  b.classList.add('hidden');
+                  b.classList.add('hidden'); 
               }
           }
 
