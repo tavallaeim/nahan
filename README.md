@@ -61,8 +61,9 @@ Nahan isn't just a proxy script — it's a complete management solution designed
 |---|---|
 | 🔐 **Dual Protocol** | Switch instantly between **VLESS** (Alpha), **Trojan** (Beta), or **Both** simultaneously |
 | 📱 **QR Code Generation** | Modal-based QR codes for instant mobile client configuration |
-| 👥 **Multi-User Profiles** | Create separate profiles (`uuid:name`) with unique subscription links per user |
+| 👥 **Multi-User Profiles** | Create separate profiles with unique subscription links, per-user nodes, and per-user NAT64 |
 | 🌍 **Clean IP Multiplexer** | Input a list of clean Cloudflare IPs — Nahan auto-generates configs for all of them |
+| 🌐 **NAT64 Support** | Automatic IPv4-to-NAT64-mapped IPv6 conversion with multiple prefix support |
 | ⚙️ **Real-Time Metrics** | View Origin IP, Edge Node location, and run browser-side latency diagnostics |
 | 💾 **D1 SQLite Storage** | All configuration persists in Cloudflare D1 even after code updates |
 | 🚨 **Kill Switch** | Immediately pause all proxy traffic with one click from the dashboard or Telegram |
@@ -70,6 +71,12 @@ Nahan isn't just a proxy script — it's a complete management solution designed
 | 📋 **Activity Logs** | Full history of login attempts and configuration changes |
 | 🔒 **ECH Support** | Toggle Encrypted Client Hello (ECH) parameters in generated client configs |
 | 📦 **Backup & Restore** | Export/import your full configuration as a `.json` file |
+| 🔄 **Auto Update** | Automatic deployment of new versions from GitHub with format and obfuscation options |
+| 🎭 **Configurable Fake Configs** | Customizable fake subscription entries with `{usage}` and `{expiry}` template variables |
+| 🖥️ **Per-User Nodes** | Define custom hostnames per subscriber for multi-region deployments |
+| 🏷️ **Rich Name Strategy** | Config naming with `{FLAG}`, `{COUNTRY}`, `{CITY}`, `{ISP}`, `{HOST}`, `{DATE}`, `{WORKER}` tags |
+| 🌐 **Bilingual Subscription Page** | Subscription info page with full **Persian/Farsi** and **English** support, RTL layout, and dark/light mode toggle |
+| 🤖 **Telegram Bot Management** | Full gateway management via inline Telegram buttons — users, settings, logs, and advanced config |
 
 ---
 

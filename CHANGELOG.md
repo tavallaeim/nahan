@@ -9,6 +9,52 @@ All notable changes to Project Nahan will be documented in this file.
 
 ---
 
+## [2.6.0] - ۱۴۰۵-۰۴-۰۳ (2026-06-24)
+
+<!-- LANG:FA -->
+### اضافه شده (Added)
+- **صفحه اشتراک چندزبانه با حالت تاریک/روشن**: صفحه اطلاعات اشتراک کاربر با پشتیبانی کامل از فارسی و انگلیسی، چیدمان RTL و قابلیت تغییر تم.
+- **پشتیبانی NAT64**: تبدیل خودکار آدرس‌های IPv4 به IPv6 با قابلیت تنظیم چندین پیشوند.
+- **نودهای اختصاصی کاربر**: امکان تعریف هاست اختصاصی برای هر مشترک به‌صورت جداگانه.
+- **کانفیگ‌های مستقیم**: تولید کانفیگ‌های اضافی بدون نیاز به آدرس پروکسی.
+- **بروزرسانی خودکار**: دریافت و استقرار نسخه‌های جدید مستقیماً از داشبورد.
+- **کانفیگ‌های جعلی قابل تنظیم**: ورودی‌های اشتراک سفارشی با نمایش مصرف و انقضا.
+- **اتصال ربات تلگرام از داشبورد**: مدیریت کامل دروازه از طریق دکمه‌های تلگرام.
+
+### بهبود یافته (Improved)
+- **عملکرد داشبورد**: بهبود چشمگیر سرعت اسکرول و بارگذاری صفحات.
+- **تولید کانفیگ‌ها**: بازنویسی کامل تمام فرمت‌های خروجی (URI، YAML، Clash، SingBox).
+- **تشخیص موقعیت آدرس‌ها**: بهبود سرعت و دقت نمایش پرچم کشورها.
+- **نام‌گذاری هوشمند کانفیگ‌ها**: پشتیبانی از تگ‌های جدید شامل کشور، شهر، ارائه‌دهنده، تاریخ و نام ورکر.
+
+### رفع شده (Fixed)
+- **ترجمه‌های فارسی معیوب**: اصلاح تمام متن‌های نادرست رابط کاربری فارسی.
+- **خطای صفحه اشتراک**: رفع خطای نمایش صفحه اطلاعات اشتراک.
+<!-- LANG:FA -->
+
+<!-- LANG:EN -->
+### Added
+- **Bilingual Subscription Page with Dark/Light Mode**: Full Persian and English support, RTL layout, and theme toggle on the subscription info page.
+- **NAT64 Support**: Automatic IPv4-to-IPv6 address conversion with multiple prefix support.
+- **Per-User Custom Nodes**: Define dedicated hostnames for each subscriber independently.
+- **Direct Configs**: Generate additional subscription entries that connect directly without proxy IPs.
+- **Auto Update**: Receive and deploy new versions directly from the dashboard.
+- **Customizable Fake Configs**: Custom subscription entries showing usage and expiry information.
+- **Telegram Bot from Dashboard**: Full gateway management via inline Telegram buttons.
+
+### Improved
+- **Dashboard Performance**: Significant speed improvements for scrolling and page loading.
+- **Config Generation**: Complete rewrite of all output formats (URI, YAML, Clash, SingBox).
+- **Geo-Location Detection**: Faster and more accurate country flag display for IP addresses.
+- **Smart Config Naming**: New tags for country, city, ISP, date, and worker name.
+
+### Fixed
+- **Garbled Persian Translations**: Corrected all incorrect UI text in the Persian interface.
+- **Subscription Page Error**: Fixed the subscription info page display issue.
+<!-- LANG:EN -->
+
+---
+
 ## [2.5.7] - ۱۴۰۵-۰۳-۲۹ (2026-06-19)
 
 <!-- LANG:FA -->

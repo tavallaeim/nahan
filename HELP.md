@@ -97,6 +97,17 @@ Replace `Username` with the exact name you used when creating the profile (case-
 
 The **Cloud Sync URL** is the base subscription endpoint. Import this directly into clients that support subscription URLs (v2rayN, Hiddify, Nekoray, Shadowrocket, etc.) for automatic config updates.
 
+### Subscription Info Page
+
+When a user opens their subscription URL in a browser, they see a beautifully designed info page showing:
+
+- **Usage metrics** — Total and daily traffic consumption with progress bars
+- **Expiration date** — When the subscription expires
+- **Status badge** — Active, Paused, Expired, or Limit Exceeded
+- **Universal Sync Link** — Auto-detecting configuration URL with copy and QR code buttons
+- **Language toggle** — Switch between English and Persian (فارسی) with full RTL support
+- **Dark/Light mode** — Toggle between themes; preference is saved in browser
+
 ---
 
 ## 4. Tab 2 — Metrics (Network)
@@ -271,6 +282,22 @@ Also triggerable via the Telegram `/pause` command.
 ### Secure Hello (ECH)
 
 When enabled, Encrypted Client Hello (ECH) parameters are injected into generated client configurations. ECH provides an additional layer of TLS fingerprint obfuscation. Leave enabled unless your clients don't support it.
+
+### NAT64
+
+IPv6 NAT64 prefix for clients that need IPv6-mapped addresses. Enter one or more prefixes (comma or newline separated). When set, proxy IPs are automatically converted to NAT64-mapped IPv6 addresses and included alongside the original IPv4 addresses in subscription configs.
+
+### Per-User Nodes
+
+Each user can have custom hostnames defined. When set, the subscription generator uses these hostnames instead of (or in addition to) the global slave nodes. This enables multi-region deployments where different users connect through different edge locations.
+
+### Direct Configs
+
+When enabled, additional config entries are generated **without** the proxy IP — connecting directly through the clean IP. This gives users both proxied and direct connection options in their subscription.
+
+### Auto Update
+
+When enabled, the dashboard periodically checks your linked GitHub repository for new versions and shows an update banner. You can deploy directly from the dashboard with format options (normal or obfuscated).
 
 ---
 
